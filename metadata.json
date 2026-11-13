@@ -1,0 +1,6 @@
+{
+  "name": "GeoScript Studio — Pembuat Script & Panduan Pemetaan GIS",
+  "description": "Generator script pengolahan data spasial dan pemetaan untuk Python (GeoPandas/Rasterio), Google Earth Engine (GEE), PyQGIS, ArcGIS ArcPy, PostGIS, dan GDAL lengkap dengan tutorial langkah demi langkah.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

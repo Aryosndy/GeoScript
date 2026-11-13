@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Outfit", "Plus Jakarta Sans", sans-serif;
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    background-color: #f3f6f9;
+    background-image:
+      radial-gradient(at 10% 0%, rgba(186, 230, 253, 0.35) 0px, transparent 52%),
+      radial-gradient(at 92% 8%, rgba(204, 251, 241, 0.32) 0px, transparent 48%);
+    background-attachment: fixed;
+    color: #1e293b;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+  }
+
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+  }
+  header,
+  footer,
+  .no-print {
+    display: none !important;
+  }
+  .print-report-sheet {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+  }
+}
+
