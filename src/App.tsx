@@ -31,6 +31,7 @@ import { TutorialsCatalogView } from './components/TutorialsCatalogView';
 import { SpectralAndCrsToolbox } from './components/SpectralAndCrsToolbox';
 import { SavedScriptsView, type SavedScriptItem } from './components/SavedScriptsView';
 import { GeoGeminiChatbot } from './components/GeoGeminiChatbot';
+import { CoastalHydroWorkbench } from './components/CoastalHydroWorkbench';
 import type { MapVisualizationResult } from './utils/mapVisualizerEngine';
 import { loadRealEoGrid, type RealEoGrid } from './utils/realEoGridLoader';
 import { Download, SlidersHorizontal, Search } from 'lucide-react';
@@ -115,6 +116,7 @@ export default function App() {
   const [vizRunError, setVizRunError] = useState<string | null>(null);
   const [runSignal, setRunSignal] = useState<number>(0);
   const mapSectionRef = useRef<HTMLDivElement | null>(null);
+  const coastalSectionRef = useRef<HTMLDivElement | null>(null);
   const eoFetchRequestIdRef = useRef<number>(0);
 
   // Google Maps Platform Tier 1 Demo Key Quota Exceeded Listener
@@ -196,7 +198,13 @@ export default function App() {
       tpl.id === 'uav-agisoft-metashape' ||
       tpl.id === 'uav-pix4d-photogrammetry' ||
       tpl.id === 'tidal-analysis-harmonics' ||
-      tpl.id === 'shoreline-slope-erosion'
+      tpl.id === 'shoreline-slope-erosion' ||
+      tpl.id === 'hydrodynamic-2d-current' ||
+      tpl.id === 'tss-turbidity-mapping' ||
+      tpl.id === 'bathymetry-cross-section' ||
+      tpl.id === 'big-tidal-prediction' ||
+      tpl.id === 'coastal-abrasion-accretion-dsas' ||
+      tpl.id === 'marine-spatial-wpp-conservation'
     ) {
       setSelectedPlatform(tpl.defaultPlatform);
     }
@@ -374,6 +382,19 @@ export default function App() {
               Studio Script
             </a>
             <a
+              href="#hidrodinamika-pasut"
+              onClick={(e) => {
+                e.preventDefault();
+                setActiveSection('studio');
+                window.setTimeout(() => {
+                  coastalSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }, 60);
+              }}
+              className="py-1 transition-colors whitespace-nowrap shrink-0 hover:text-slate-900 text-teal-700 font-semibold"
+            >
+              Hidrodinamika & Pasut BIG
+            </a>
+            <a
               href="#panduan"
               onClick={(e) => {
                 e.preventDefault();
@@ -498,9 +519,54 @@ export default function App() {
               </div>
             </section>
 
+            {/* Full-Width Interactive AOI Map Centerpiece (Google Maps & Esri Basemaps + Live Spatial Layer) */}
+            <div id="interactive-aoi-map-section" ref={mapSectionRef} className="w-full">
+              <InteractiveAoiMap
+                activeTemplateId={activeTemplate.id}
+                platformId={selectedPlatform}
+                params={params}
+                regionName={params.regionName}
+                bbox={params.bbox}
+                crsEpsg={params.crsEpsg}
+                bufferDistanceMeters={params.bufferDistanceMeters}
+                customPolygon={params.customPolygon}
+                realEoGrid={realEoGrid}
+                isRunningViz={isRunningViz}
+                vizRunError={vizRunError}
+                runSignal={runSignal}
+                onSelectPreset={handleSelectRegionPreset}
+                onUpdateBbox={handleUpdateBbox}
+                onUpdateCustomPolygon={handleUpdateCustomPolygon}
+                onVisualizationChange={setLiveVizResult}
+                onRunVisualization={() => void handleRunVisualization({ forceRefresh: true })}
+              />
+            </div>
+
+            {/* Full-Width Coastal & Hydro-Oceanography Workbench (BIG Tide, Bathymetry Cross-Section, 2D Current, TSS, DSAS) */}
+            <div id="hidrodinamika-pasut" ref={coastalSectionRef} className="w-full">
+              <CoastalHydroWorkbench
+                params={params}
+                realEoGrid={realEoGrid}
+                activeTemplateId={activeTemplate.id}
+                onActivateCoastalModel={(tplId, platId, nextThreshold) => {
+                  const found = GIS_TEMPLATES.find((t) => t.id === tplId);
+                  if (found) {
+                    handleSelectTemplate(found);
+                  } else {
+                    setSelectedTemplateId(tplId);
+                  }
+                  setSelectedPlatform(platId);
+                  if (nextThreshold !== undefined) {
+                    setParams((prev) => ({ ...prev, thresholdValue: nextThreshold }));
+                  }
+                  void handleRunVisualization({ scrollToMap: true, forceRefresh: false });
+                }}
+              />
+            </div>
+
             {/* 2-Column Studio Split */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Left Column: Workflow Selector + AOI Map + Spatial File Importer + Parameter Form (5 cols) */}
+              {/* Left Column: Workflow Selector + Spatial File Importer + Parameter Form (5 cols) */}
               <div className="lg:col-span-5 space-y-5">
                 {/* 1. Template Library Selector */}
                 <div className="bg-white/90 backdrop-blur-xs border border-slate-200/80 rounded-2xl p-4 sm:p-5 shadow-[0_6px_24px_-10px_rgba(15,23,42,0.06)] space-y-3.5">
@@ -578,30 +644,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 2. Interactive AOI Map (Google Maps & Esri Basemaps + Polygon Drawing + Live Spatial Layer) */}
-                <div id="interactive-aoi-map-section" ref={mapSectionRef}>
-                  <InteractiveAoiMap
-                    activeTemplateId={activeTemplate.id}
-                    platformId={selectedPlatform}
-                    params={params}
-                    regionName={params.regionName}
-                    bbox={params.bbox}
-                    crsEpsg={params.crsEpsg}
-                    bufferDistanceMeters={params.bufferDistanceMeters}
-                    customPolygon={params.customPolygon}
-                    realEoGrid={realEoGrid}
-                    isRunningViz={isRunningViz}
-                    vizRunError={vizRunError}
-                    runSignal={runSignal}
-                    onSelectPreset={handleSelectRegionPreset}
-                    onUpdateBbox={handleUpdateBbox}
-                    onUpdateCustomPolygon={handleUpdateCustomPolygon}
-                    onVisualizationChange={setLiveVizResult}
-                    onRunVisualization={() => void handleRunVisualization({ forceRefresh: true })}
-                  />
-                </div>
-
-                {/* 3. Spatial File Importer & Sample Dataset Loader */}
+                {/* 2. Spatial File Importer & Sample Dataset Loader */}
                 <SpatialFileImporter
                   activeFileSummary={params.uploadedFileSummary}
                   onSpatialFileLoaded={handleSpatialFileLoaded}

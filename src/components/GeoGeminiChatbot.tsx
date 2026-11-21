@@ -28,6 +28,7 @@ interface ChatMessage {
   role: 'user' | 'model';
   text: string;
   modelUsed?: string;
+  sources?: Array<{ title: string; uri: string }>;
 }
 
 interface GeoGeminiChatbotProps {
@@ -105,6 +106,7 @@ export const GeoGeminiChatbot: React.FC<GeoGeminiChatbotProps> = ({ studioContex
         role: 'model',
         text: data.reply || 'Tidak ada respons teks.',
         modelUsed: data.model,
+        sources: Array.isArray(data.sources) ? data.sources : undefined,
       };
       setMessages((prev) => [...prev, botMsg]);
     } catch (err: unknown) {
@@ -245,7 +247,25 @@ export const GeoGeminiChatbot: React.FC<GeoGeminiChatbotProps> = ({ studioContex
                           : 'bg-white text-slate-800 border border-slate-200/80 rounded-tl-xs'
                       }`}
                     >
-                      {msg.text}
+                      <div>{msg.text}</div>
+                      {!isUser && msg.sources && msg.sources.length > 0 && (
+                        <div className="mt-2 pt-2 border-t border-slate-200/80 flex flex-wrap gap-1">
+                          <span className="text-[10px] font-semibold text-slate-500 w-full">
+                            Sumber Google Search:
+                          </span>
+                          {msg.sources.map((src) => (
+                            <a
+                              key={src.uri}
+                              href={src.uri}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="px-2 py-0.5 rounded bg-sky-50 border border-sky-200 text-[10px] font-medium text-sky-800 hover:bg-sky-100 truncate max-w-[190px]"
+                            >
+                              {src.title}
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

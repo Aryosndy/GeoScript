@@ -24,6 +24,17 @@ import {
   generateMapVisualization,
   type MapVisualizationResult,
 } from '../utils/mapVisualizerEngine';
+import {
+  exportAdminAndMarineGeoJson,
+  generateAdminAndMarineSpatialBundle,
+  type AdminBoundaryLevel,
+  type AdminBoundaryPolygon,
+  type LiveSpatialZonesPayload,
+  type MarineSpatialZonePolygon,
+  type MarineZoneCategory,
+  type ShorelineDatumId,
+  type ShorelinePolyline,
+} from '../utils/adminAndMarineZonesEngine';
 import type { RealEoGrid } from '../utils/realEoGridLoader';
 import type { GisPlatformId, ScriptParameters } from '../utils/gisEngine';
 import {
@@ -50,6 +61,8 @@ import {
   Play,
   Loader2,
   Terminal,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 
 export type BasemapId =
@@ -164,6 +177,11 @@ const GoogleMapVectorOverlays: React.FC<{
   showVisualization: boolean;
   vizOpacity: number;
   vizResult: MapVisualizationResult | null;
+  activeAdminPolygons: AdminBoundaryPolygon[];
+  activeMarineZones: MarineSpatialZonePolygon[];
+  activeShorelineLines: ShorelinePolyline[];
+  selectedAdminId?: string | null;
+  onSelectAdminPolygon?: (id: string) => void;
   onEditableRectangleChanged: (newBbox: BoundingBox) => void;
 }> = ({
   bbox,
@@ -174,6 +192,11 @@ const GoogleMapVectorOverlays: React.FC<{
   showVisualization,
   vizOpacity,
   vizResult,
+  activeAdminPolygons,
+  activeMarineZones,
+  activeShorelineLines,
+  selectedAdminId = null,
+  onSelectAdminPolygon,
   onEditableRectangleChanged,
 }) => {
   const map = useMap();
@@ -183,6 +206,8 @@ const GoogleMapVectorOverlays: React.FC<{
   const circleRef = useRef<google.maps.Circle | null>(null);
   const groundOverlayRef = useRef<google.maps.GroundOverlay | null>(null);
   const domainLinesRef = useRef<google.maps.Polyline[]>([]);
+  const zonePolysRef = useRef<google.maps.Polygon[]>([]);
+  const shorelineLinesRef = useRef<google.maps.Polyline[]>([]);
   const suppressProgrammaticRef = useRef<boolean>(false);
 
   // Fit bounds when preset or uploaded file changes
@@ -382,7 +407,81 @@ const GoogleMapVectorOverlays: React.FC<{
         domainLinesRef.current.push(line);
       });
     }
-  }, [map, bbox, customPolygon, showBufferPreview, bufferDistanceMeters, showVisualization, vizOpacity, vizResult]);
+
+    // 7. Administrative Boundaries (Provinsi, Kab/Kota, Kecamatan, Desa, RT/RW) & Marine Zones (WPP-NRI, Konservasi, RZWP-3-K)
+    zonePolysRef.current.forEach((zp) => zp.setMap(null));
+    zonePolysRef.current = [];
+    activeMarineZones.forEach((mz) => {
+      const poly = new google.maps.Polygon({
+        map,
+        paths: mz.vertices,
+        strokeColor: mz.strokeColor,
+        strokeOpacity: 0.92,
+        strokeWeight: 2,
+        fillColor: mz.strokeColor,
+        fillOpacity: 0.16,
+        clickable: false,
+      });
+      zonePolysRef.current.push(poly);
+    });
+    activeAdminPolygons.forEach((adm) => {
+      const isSelected = selectedAdminId === adm.id;
+      const poly = new google.maps.Polygon({
+        map,
+        paths: adm.vertices,
+        strokeColor: isSelected ? '#facc15' : adm.strokeColor,
+        strokeOpacity: isSelected ? 1.0 : 0.9,
+        strokeWeight: isSelected
+          ? 3.4
+          : adm.level === 'provinsi'
+          ? 2.5
+          : adm.level === 'rtrw'
+          ? 1.4
+          : 1.8,
+        fillColor: isSelected ? '#facc15' : adm.strokeColor,
+        fillOpacity: isSelected
+          ? 0.28
+          : adm.level === 'rtrw'
+          ? 0.14
+          : adm.level === 'desa'
+          ? 0.1
+          : 0.04,
+        clickable: Boolean(onSelectAdminPolygon),
+      });
+      if (onSelectAdminPolygon) {
+        poly.addListener('click', () => onSelectAdminPolygon(adm.id));
+      }
+      zonePolysRef.current.push(poly);
+    });
+    // 8. Real Extracted Shoreline Polylines (Garis Pantai MSL 0m, HHWL, LLWL, OSM Coastline)
+    shorelineLinesRef.current.forEach((sl) => sl.setMap(null));
+    shorelineLinesRef.current = [];
+    activeShorelineLines.forEach((sl) => {
+      const polyLine = new google.maps.Polyline({
+        map,
+        path: sl.vertices,
+        strokeColor: sl.strokeColor,
+        strokeOpacity: 0.98,
+        strokeWeight: sl.strokeWeight,
+        clickable: false,
+      });
+      shorelineLinesRef.current.push(polyLine);
+    });
+  }, [
+    map,
+    bbox,
+    customPolygon,
+    showBufferPreview,
+    bufferDistanceMeters,
+    showVisualization,
+    vizOpacity,
+    vizResult,
+    activeAdminPolygons,
+    activeMarineZones,
+    activeShorelineLines,
+    selectedAdminId,
+    onSelectAdminPolygon,
+  ]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -393,6 +492,8 @@ const GoogleMapVectorOverlays: React.FC<{
       circleRef.current?.setMap(null);
       groundOverlayRef.current?.setMap(null);
       domainLinesRef.current.forEach((pl) => pl.setMap(null));
+      zonePolysRef.current.forEach((zp) => zp.setMap(null));
+      shorelineLinesRef.current.forEach((sl) => sl.setMap(null));
     };
   }, []);
 
@@ -416,6 +517,13 @@ const EsriSlippyTileViewer: React.FC<{
   showVisualization: boolean;
   vizOpacity: number;
   vizResult: MapVisualizationResult | null;
+  activeAdminPolygons: AdminBoundaryPolygon[];
+  activeMarineZones: MarineSpatialZonePolygon[];
+  activeShorelineLines: ShorelinePolyline[];
+  showAdminLabels?: boolean;
+  selectedAdminId?: string | null;
+  onSelectAdminPolygon?: (id: string) => void;
+  isExpandedHeight?: boolean;
   onMapClickLatLng: (lat: number, lng: number) => void;
 }> = ({
   tileUrlTemplate,
@@ -429,14 +537,36 @@ const EsriSlippyTileViewer: React.FC<{
   showVisualization,
   vizOpacity,
   vizResult,
+  activeAdminPolygons,
+  activeMarineZones,
+  activeShorelineLines,
+  showAdminLabels = true,
+  selectedAdminId = null,
+  onSelectAdminPolygon,
+  isExpandedHeight = false,
   onMapClickLatLng,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [zoom, setZoom] = useState<number>(9);
+  const [zoom, setZoom] = useState<number>(10);
+  const [viewSize, setViewSize] = useState<{ w: number; h: number }>({ w: 1240, h: 580 });
   const [center, setCenter] = useState<{ lat: number; lng: number }>({
     lat: (bbox.minLat + bbox.maxLat) / 2,
     lng: (bbox.minLon + bbox.maxLon) / 2,
   });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = Math.max(480, Math.round(entry.contentRect.width));
+        const h = Math.max(380, Math.round(entry.contentRect.height));
+        setViewSize({ w, h });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Recenter and compute appropriate zoom when preset or file changes
   useEffect(() => {
@@ -444,15 +574,15 @@ const EsriSlippyTileViewer: React.FC<{
     const cLng = (bbox.minLon + bbox.maxLon) / 2;
     setCenter({ lat: cLat, lng: cLng });
     const span = Math.max(bbox.maxLon - bbox.minLon, bbox.maxLat - bbox.minLat);
-    if (span > 2.5) setZoom(7);
-    else if (span > 1.0) setZoom(8);
-    else if (span > 0.4) setZoom(9);
-    else if (span > 0.15) setZoom(11);
-    else setZoom(12);
+    if (span > 2.5) setZoom(8);
+    else if (span > 1.0) setZoom(9);
+    else if (span > 0.4) setZoom(10);
+    else if (span > 0.15) setZoom(12);
+    else setZoom(13);
   }, [fitTriggerKey]);
 
-  const VIEW_W = 760;
-  const VIEW_H = 340;
+  const VIEW_W = viewSize.w;
+  const VIEW_H = viewSize.h;
   const scale = 256 * Math.pow(2, zoom);
 
   const lonToWorldX = (lon: number) => ((lon + 180) / 360) * scale;
@@ -530,7 +660,9 @@ const EsriSlippyTileViewer: React.FC<{
   return (
     <div
       ref={containerRef}
-      className="relative w-full h-72 sm:h-80 bg-slate-900 overflow-hidden select-none"
+      className={`relative w-full ${
+        isExpandedHeight ? 'h-[680px] sm:h-[760px]' : 'h-[480px] sm:h-[560px] lg:h-[600px]'
+      } bg-slate-900 overflow-hidden select-none transition-all duration-200`}
       data-testid="esri-slippy-map"
     >
       {/* Esri Raster Tiles Layer */}
@@ -585,6 +717,171 @@ const EsriSlippyTileViewer: React.FC<{
           strokeWidth={customPolygon && customPolygon.length >= 3 ? '1.5' : '2.5'}
           strokeDasharray={customPolygon && customPolygon.length >= 3 ? '4 4' : undefined}
         />
+
+        {/* Marine Spatial Zones Overlay (WPP-NRI, Konservasi KKPD/KKPN, Sempadan Mangrove, RZWP-3-K, Alur SKKL) */}
+        {activeMarineZones.map((mz) => {
+          const pts = mz.vertices
+            .map((v) => {
+              const p = latLngToPixel(v.lat, v.lng);
+              return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+            })
+            .join(' ');
+          const cPx = latLngToPixel(mz.centerLat, mz.centerLng);
+          return (
+            <g key={mz.id}>
+              <polygon
+                points={pts}
+                fill={mz.fillColor}
+                stroke={mz.strokeColor}
+                strokeWidth="2"
+                strokeDasharray={mz.strokeDash}
+              />
+              <rect
+                x={cPx.x - 54}
+                y={cPx.y - 9}
+                width="108"
+                height="16"
+                rx="4"
+                fill="rgba(15, 23, 42, 0.82)"
+                stroke={mz.strokeColor}
+                strokeWidth="1"
+              />
+              <text
+                x={cPx.x}
+                y={cPx.y + 2.5}
+                textAnchor="middle"
+                fill="#ffffff"
+                fontSize="8.5"
+                fontWeight="700"
+                fontFamily="monospace"
+              >
+                {mz.zoneCode}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Administrative Boundary Hierarchy Overlay (Provinsi, Kab/Kota, Kecamatan, Desa/Kelurahan, RT/RW) */}
+        {activeAdminPolygons.map((adm) => {
+          const isSelected = selectedAdminId === adm.id;
+          const pts = adm.vertices
+            .map((v) => {
+              const p = latLngToPixel(v.lat, v.lng);
+              return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+            })
+            .join(' ');
+          const cPx = latLngToPixel(adm.centerLat, adm.centerLng);
+          const shortLabel =
+            adm.level === 'rtrw'
+              ? adm.name.split(' (')[0]
+              : adm.level === 'desa'
+              ? adm.name.split(' (')[0]
+              : `${adm.levelLabel.replace('Batas ', '')}: ${adm.codeKemendagri}`;
+          return (
+            <g
+              key={adm.id}
+              onClick={(e) => {
+                if (onSelectAdminPolygon) {
+                  e.stopPropagation();
+                  onSelectAdminPolygon(adm.id);
+                }
+              }}
+              className="cursor-pointer"
+            >
+              <polygon
+                points={pts}
+                fill={isSelected ? 'rgba(250, 204, 21, 0.28)' : adm.fillColor}
+                stroke={isSelected ? '#facc15' : adm.strokeColor}
+                strokeWidth={
+                  isSelected
+                    ? '3.2'
+                    : adm.level === 'provinsi'
+                    ? '2.4'
+                    : adm.level === 'rtrw'
+                    ? '1.3'
+                    : '1.8'
+                }
+                strokeDasharray={isSelected ? undefined : adm.strokeDash}
+              />
+              {showAdminLabels && (
+                <text
+                  x={cPx.x}
+                  y={cPx.y}
+                  textAnchor="middle"
+                  fill={isSelected ? '#fef08a' : '#ffffff'}
+                  stroke="#0f172a"
+                  strokeWidth="2.5"
+                  paintOrder="stroke"
+                  fontSize={adm.level === 'rtrw' ? '8.5' : '9.5'}
+                  fontWeight="700"
+                  fontFamily="monospace"
+                >
+                  {shortLabel}
+                </text>
+              )}
+            </g>
+          );
+        })}
+
+        {/* Extracted Real Shoreline Polylines (Garis Pantai Utama MSL 0m, HHWL Pasang Tertinggi, LLWL Surut Terendah, Vektor OSM) */}
+        {activeShorelineLines.map((sl) => {
+          const pts = sl.vertices
+            .map((v) => {
+              const p = latLngToPixel(v.lat, v.lng);
+              return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+            })
+            .join(' ');
+          const midIdx = Math.floor(sl.vertices.length / 2);
+          const midVertex = sl.vertices[midIdx] || sl.vertices[0];
+          const midPx = midVertex ? latLngToPixel(midVertex.lat, midVertex.lng) : null;
+          return (
+            <g key={sl.id}>
+              <polyline
+                points={pts}
+                fill="none"
+                stroke="#0f172a"
+                strokeWidth={sl.strokeWeight + 2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity="0.75"
+              />
+              <polyline
+                points={pts}
+                fill="none"
+                stroke={sl.strokeColor}
+                strokeWidth={sl.strokeWeight}
+                strokeDasharray={sl.strokeDash}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              {midPx && sl.datumType === 'garispantai-msl' && (
+                <g>
+                  <rect
+                    x={midPx.x - 68}
+                    y={midPx.y - 19}
+                    width="136"
+                    height="15"
+                    rx="4"
+                    fill="rgba(15, 23, 42, 0.9)"
+                    stroke={sl.strokeColor}
+                    strokeWidth="1.2"
+                  />
+                  <text
+                    x={midPx.x}
+                    y={midPx.y - 9}
+                    textAnchor="middle"
+                    fill="#fef08a"
+                    fontSize="8.5"
+                    fontWeight="700"
+                    fontFamily="monospace"
+                  >
+                    GARIS PANTAI MSL ({sl.lengthKm} km)
+                  </text>
+                </g>
+              )}
+            </g>
+          );
+        })}
 
         {/* Shoreline Slope / DSAS Transects */}
         {showVisualization &&
@@ -808,6 +1105,36 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
   } | null>(null);
   const [isLocating, setIsLocating] = useState<boolean>(false);
   const [geoError, setGeoError] = useState<string | null>(null);
+  const [isExpandedHeight, setIsExpandedHeight] = useState<boolean>(false);
+  const [enabledAdminLevels] = useState<AdminBoundaryLevel[]>([]);
+  const [enabledMarineCategories, setEnabledMarineCategories] = useState<MarineZoneCategory[]>([
+    'wpp-nri',
+    'konservasi-kkpd',
+    'sempadan-mangrove',
+    'rzwp3k-pelabuhan',
+    'alur-pipa-kabel',
+  ]);
+  const [enabledShorelineTypes, setEnabledShorelineTypes] = useState<ShorelineDatumId[]>([
+    'garispantai-msl',
+    'garispantai-hhwl',
+    'garispantai-llwl',
+    'garispantai-osm',
+  ]);
+  const [liveSpatialData, setLiveSpatialData] = useState<LiveSpatialZonesPayload | null>(null);
+  const [isFetchingLiveSpatial, setIsFetchingLiveSpatial] = useState<boolean>(false);
+  const [rtrwBlockCount, setRtrwBlockCount] = useState<6 | 9 | 12>(6);
+  const [showAdminLabels, setShowAdminLabels] = useState<boolean>(true);
+  const [selectedAdminId, setSelectedAdminId] = useState<string | null>(null);
+  const [adminSearchFilter, setAdminSearchFilter] = useState<string>('');
+  const [groundedProfile, setGroundedProfile] = useState<{
+    summaryText: string;
+    sources: Array<{ title: string; uri: string }>;
+    model: string;
+    groundedAt: string;
+  } | null>(null);
+  const [isGroundingAdmin, setIsGroundingAdmin] = useState<boolean>(false);
+  const [groundingError, setGroundingError] = useState<string | null>(null);
+  const [showAdminMarineTable, setShowAdminMarineTable] = useState<boolean>(true);
   const fitTriggerKey = `${regionName}:${bbox.minLon.toFixed(4)},${bbox.minLat.toFixed(4)},${bbox.maxLon.toFixed(4)},${bbox.maxLat.toFixed(4)}`;
 
   useEffect(() => {
@@ -815,6 +1142,35 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
       setShowVisualization(true);
     }
   }, [runSignal]);
+
+  // Fetch real Nominatim Reverse Geocoding + Overpass Coastline/Boundary vectors when AOI BBox changes
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    let cancelled = false;
+    setIsFetchingLiveSpatial(true);
+    const qs = new URLSearchParams({
+      minLon: String(bbox.minLon),
+      minLat: String(bbox.minLat),
+      maxLon: String(bbox.maxLon),
+      maxLat: String(bbox.maxLat),
+    });
+    fetch(`/api/spatial/real-zones?${qs.toString()}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: LiveSpatialZonesPayload | null) => {
+        if (!cancelled && data) {
+          setLiveSpatialData(data);
+        }
+      })
+      .catch(() => {
+        // Fallback handled seamlessly by DEM + coastal topology engine
+      })
+      .finally(() => {
+        if (!cancelled) setIsFetchingLiveSpatial(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat]);
 
   const activeBasemapMeta =
     BASEMAP_OPTIONS.find((b) => b.id === selectedBasemap) || BASEMAP_OPTIONS[0];
@@ -831,6 +1187,100 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
     hasCustomPolygon && customPolygon ? calculatePolygonPerimeterKm(customPolygon) : 0;
 
   const recommendedUtm = recommendUtmEpsg(centerLon, centerLat);
+
+  const adminMarineBundle = React.useMemo(
+    () =>
+      generateAdminAndMarineSpatialBundle(
+        bbox,
+        regionName,
+        realEoGrid,
+        liveSpatialData,
+        rtrwBlockCount
+      ),
+    [bbox, regionName, realEoGrid, liveSpatialData, rtrwBlockCount]
+  );
+
+  const activeAdminPolygons: AdminBoundaryPolygon[] = [];
+
+  const handleRunAdminSearchGrounding = async () => {
+    setIsGroundingAdmin(true);
+    setGroundingError(null);
+    try {
+      const res = await fetch('/api/spatial/grounded-admin-profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          regionName,
+          provinsi: adminMarineBundle.adminHierarchySummary.provinsi,
+          kabKota: adminMarineBundle.adminHierarchySummary.kabKota,
+          kecamatan: adminMarineBundle.adminHierarchySummary.kecamatan,
+          desaKelurahan: adminMarineBundle.adminHierarchySummary.desaKelurahan.join(', '),
+          centerLat,
+          centerLon,
+          wppCode: adminMarineBundle.wppPrimary.code,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Gagal memuat Google Search Grounding (HTTP ${res.status})`);
+      }
+      setGroundedProfile(data);
+    } catch (err: unknown) {
+      setGroundingError(
+        err instanceof Error ? err.message : 'Gagal menjalankan pencarian Google Search Grounding.'
+      );
+      } finally {
+        setIsGroundingAdmin(false);
+      }
+    };
+
+  const activeMarineZones = React.useMemo(
+    () =>
+      adminMarineBundle.marineZones.filter((z) =>
+        enabledMarineCategories.includes(z.category)
+      ),
+    [adminMarineBundle, enabledMarineCategories]
+  );
+
+  const activeShorelineLines = React.useMemo(
+    () =>
+      adminMarineBundle.shorelineLines.filter((sl) =>
+        enabledShorelineTypes.includes(sl.datumType)
+      ),
+    [adminMarineBundle, enabledShorelineTypes]
+  );
+
+  const toggleMarineCategory = (cat: MarineZoneCategory) => {
+    setEnabledMarineCategories((prev) =>
+      prev.includes(cat) ? prev.filter((item) => item !== cat) : [...prev, cat]
+    );
+  };
+
+  const toggleShorelineType = (datumId: ShorelineDatumId) => {
+    setEnabledShorelineTypes((prev) =>
+      prev.includes(datumId) ? prev.filter((item) => item !== datumId) : [...prev, datumId]
+    );
+  };
+
+  const handleDownloadAdminMarineGeoJson = () => {
+    const geojsonText = exportAdminAndMarineGeoJson(
+      regionName,
+      crsEpsg,
+      adminMarineBundle,
+      enabledAdminLevels,
+      enabledMarineCategories,
+      enabledShorelineTypes
+    );
+    const blob = new Blob([geojsonText], { type: 'application/geo+json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `garis_pantai_batas_admin_wpp_${regionName.toLowerCase().replace(/[^a-z0-9]+/g, '_')}.geojson`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const vizResult = React.useMemo(() => {
     return generateMapVisualization(activeTemplateId, platformId, params, {
@@ -1008,8 +1458,8 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
           </p>
         </div>
 
-        {/* Basemap Provider Selector */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Basemap Provider Selector & Map Size Toggle */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <Layers className="w-3.5 h-3.5 text-teal-700 shrink-0" />
           <label htmlFor="basemap-select" className="sr-only">
             Pilih Peta Dasar (Basemap)
@@ -1035,6 +1485,24 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
               ))}
             </optgroup>
           </select>
+          <button
+            type="button"
+            onClick={() => setIsExpandedHeight((prev) => !prev)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-100/90 hover:bg-slate-200/80 text-slate-800 border border-slate-200/80 rounded-xl transition-colors"
+            title={isExpandedHeight ? 'Kembalikan ukuran tinggi standar' : 'Perbesar tinggi kanvas peta'}
+          >
+            {isExpandedHeight ? (
+              <>
+                <Minimize2 className="w-3.5 h-3.5 text-teal-700" />
+                Ukuran Standar
+              </>
+            ) : (
+              <>
+                <Maximize2 className="w-3.5 h-3.5 text-teal-700" />
+                Perbesar Kanvas
+              </>
+            )}
+          </button>
         </div>
       </div>
 
@@ -1298,6 +1766,131 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
         )}
       </div>
 
+      {/* Administrative Boundaries (Provinsi -> RT/RW) & Marine Spatial Zones (WPP-NRI, Konservasi, RZWP-3-K) Control Bar */}
+      <div
+        data-testid="admin-marine-layer-toolbar"
+        className="rounded-xl border border-slate-200/85 bg-slate-50/90 p-3 space-y-2.5"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold text-slate-900">
+              Layer Garis Pantai (MSL/HHWL/LLWL/OSM) & Zonasi Ruang Laut (WPP-NRI / Konservasi / RZWP-3-K)
+            </span>
+            <span className="text-[11px] font-mono text-teal-800 bg-teal-50 border border-teal-200 px-2 py-0.5 rounded-md">
+              {adminMarineBundle.wppPrimary.code} · {adminMarineBundle.wppPrimary.name}
+            </span>
+            <span
+              data-testid="real-spatial-status-badge"
+              className={`text-[11px] font-medium px-2 py-0.5 rounded-md border ${
+                adminMarineBundle.spatialDataStatus.isRealDemLocked ||
+                adminMarineBundle.spatialDataStatus.isLiveOsmEnriched
+                  ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                  : 'bg-sky-50 text-sky-900 border-sky-200'
+              }`}
+            >
+              {isFetchingLiveSpatial
+                ? 'Menyinkronkan OSM & DEM...'
+                : adminMarineBundle.spatialDataStatus.isRealDemLocked
+                ? `Terkunci DEM Real 0m MSL (${adminMarineBundle.spatialDataStatus.totalCoastlineKm} km Garis Pantai)`
+                : `Topologi Pesisir Aktif (${adminMarineBundle.spatialDataStatus.totalCoastlineKm} km Garis Pantai)`}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setShowAdminMarineTable((prev) => !prev)}
+              data-testid="toggle-admin-marine-table-btn"
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            >
+              {showAdminMarineTable ? 'Sembunyikan Tabel Zonasi & Garis Pantai' : 'Tampilkan Tabel Zonasi & Garis Pantai'}
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadAdminMarineGeoJson}
+              data-testid="download-admin-marine-geojson-btn"
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-teal-900 bg-teal-100/80 hover:bg-teal-200/80 border border-teal-300 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Unduh Garis Pantai & Zonasi Laut (.geojson)
+            </button>
+          </div>
+        </div>
+
+        {/* Shoreline (Garis Pantai) Filter Strip */}
+        <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-200/75">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 mr-1">
+            Garis Pantai (Shoreline):
+          </span>
+          {(
+            [
+              { id: 'garispantai-msl', label: 'Garis Pantai Utama (MSL 0,0 m)', color: '#facc15' },
+              { id: 'garispantai-hhwl', label: 'Pasang Tertinggi (HHWL +1,4 m)', color: '#f97316' },
+              { id: 'garispantai-llwl', label: 'Surut Terendah (LLWL -1,2 m)', color: '#38bdf8' },
+              { id: 'garispantai-osm', label: 'Vektor OSM Coastline', color: '#a855f7' },
+            ] as { id: ShorelineDatumId; label: string; color: string }[]
+          ).map((sl) => {
+            const active = enabledShorelineTypes.includes(sl.id);
+            return (
+              <button
+                key={sl.id}
+                type="button"
+                onClick={() => toggleShorelineType(sl.id)}
+                data-testid={`toggle-shoreline-${sl.id}`}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+                  active
+                    ? 'bg-amber-950 text-amber-100 border-amber-800 shadow-2xs'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <span
+                  className="w-3 h-1 rounded-xs shrink-0"
+                  style={{ backgroundColor: sl.color }}
+                />
+                {sl.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Marine Spatial Zones Checkboxes */}
+        <div className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-slate-200/75">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-600 mr-1">
+            Zonasi Laut & Pesisir (KKP):
+          </span>
+          {(
+            [
+              { id: 'wpp-nri', label: 'Zona WPP-NRI', color: '#0284c7' },
+              { id: 'konservasi-kkpd', label: 'Konservasi KKPD/KKPN', color: '#0d9488' },
+              { id: 'sempadan-mangrove', label: 'Sabuk Hijau & Mangrove', color: '#15803d' },
+              { id: 'rzwp3k-pelabuhan', label: 'RZWP-3-K Pelabuhan', color: '#7c3aed' },
+              { id: 'alur-pipa-kabel', label: 'Alur & Pipa/Kabel Laut', color: '#db2777' },
+            ] as { id: MarineZoneCategory; label: string; color: string }[]
+          ).map((zone) => {
+            const active = enabledMarineCategories.includes(zone.id);
+            return (
+              <button
+                key={zone.id}
+                type="button"
+                aria-pressed={active}
+                onClick={() => toggleMarineCategory(zone.id)}
+                data-testid={`toggle-marine-${zone.id}`}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+                  active
+                    ? 'bg-teal-800 text-white border-teal-800 shadow-2xs'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <span
+                  className="w-2 h-2 rounded-xs shrink-0"
+                  style={{ backgroundColor: zone.color }}
+                />
+                {zone.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {vizRunError && (
         <div className="px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
           {vizRunError}
@@ -1329,15 +1922,19 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
 
       {/* Map Viewport Container (Google Maps Platform OR Standalone Esri ArcGIS Tile Viewer) */}
       <div
-        className="relative rounded-lg overflow-hidden border border-slate-200 bg-slate-900"
+        className="relative rounded-xl overflow-hidden border border-slate-200 bg-slate-900 shadow-inner"
         data-testid="aoi-interactive-map"
       >
         {activeBasemapMeta.provider === 'google' && GOOGLE_MAPS_API_KEY ? (
-          <div className="w-full h-72 sm:h-80">
+          <div
+            className={`w-full ${
+              isExpandedHeight ? 'h-[680px] sm:h-[760px]' : 'h-[480px] sm:h-[560px] lg:h-[600px]'
+            } transition-all duration-200`}
+          >
             <APIProvider apiKey={GOOGLE_MAPS_API_KEY}>
               <GoogleMap
                 defaultCenter={{ lat: centerLat, lng: centerLon }}
-                defaultZoom={9}
+                defaultZoom={10}
                 mapId="DEMO_MAP_ID"
                 mapTypeId={activeBasemapMeta.googleMapTypeId || 'hybrid'}
                 gestureHandling="greedy"
@@ -1358,6 +1955,13 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
                   showVisualization={showVisualization}
                   vizOpacity={vizOpacity}
                   vizResult={vizResult}
+                  activeAdminPolygons={activeAdminPolygons}
+                  activeMarineZones={activeMarineZones}
+                  activeShorelineLines={activeShorelineLines}
+                  selectedAdminId={selectedAdminId}
+                  onSelectAdminPolygon={(id) =>
+                    setSelectedAdminId((prev) => (prev === id ? null : id))
+                  }
                   onEditableRectangleChanged={(nextBbox) => {
                     const cLon = (nextBbox.minLon + nextBbox.maxLon) / 2;
                     const cLat = (nextBbox.minLat + nextBbox.maxLat) / 2;
@@ -1407,6 +2011,15 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
             showVisualization={showVisualization}
             vizOpacity={vizOpacity}
             vizResult={vizResult}
+            activeAdminPolygons={activeAdminPolygons}
+            activeMarineZones={activeMarineZones}
+            activeShorelineLines={activeShorelineLines}
+            showAdminLabels={showAdminLabels}
+            selectedAdminId={selectedAdminId}
+            onSelectAdminPolygon={(id) =>
+              setSelectedAdminId((prev) => (prev === id ? null : id))
+            }
+            isExpandedHeight={isExpandedHeight}
             onMapClickLatLng={handleMapPointClick}
           />
         )}
@@ -1439,6 +2052,233 @@ export const InteractiveAoiMap: React.FC<InteractiveAoiMapProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Expandable Administrative Hierarchy (Provinsi-Desa-RT/RW) & Marine Zones (WPP-NRI / Konservasi / RZWP-3-K) Inspector Table */}
+      {showAdminMarineTable && (
+        <div
+          data-testid="admin-marine-inspector-panel"
+          className="rounded-xl border border-slate-200/85 bg-white p-3.5 space-y-3 text-xs"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 pb-2">
+            <div>
+              <h4 className="font-semibold text-slate-900">
+                Rekapitulasi Garis Pantai (MSL/HHWL/LLWL/OSM) & Zonasi Ruang Laut (KKP: WPP-NRI / Konservasi / RZWP-3-K)
+              </h4>
+              <p className="text-[11px] text-slate-500">
+                Sumber Topologi: <strong>{adminMarineBundle.spatialDataStatus.sourceDescription}</strong> — Zonasi laut (`WPP-NRI`, `Konservasi`, `RZWP-3-K`) dikunci pada perairan laut (`elev ≤ 0 m MSL`) mengikuti lekuk Garis Pantai.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={isGroundingAdmin}
+                onClick={handleRunAdminSearchGrounding}
+                data-testid="verify-admin-google-search-btn"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-lg bg-sky-700 hover:bg-sky-800 disabled:opacity-60 text-white shadow-2xs transition-colors"
+              >
+                {isGroundingAdmin ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3 h-3" />
+                )}
+                {isGroundingAdmin
+                  ? 'Mencari Data Google Search...'
+                  : 'Verifikasi Data Wilayah (Google Search)'}
+              </button>
+              <div className="text-[11px] font-mono text-slate-700 bg-slate-100 px-2.5 py-1 rounded-lg tabular-nums">
+                {activeShorelineLines.length} Garis Pantai · {activeMarineZones.length} Zona Laut
+              </div>
+            </div>
+          </div>
+
+          {groundingError && (
+            <div className="px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-900">
+              {groundingError}
+            </div>
+          )}
+
+          {groundedProfile && (
+            <div
+              data-testid="admin-search-grounding-panel"
+              className="rounded-xl border border-sky-200 bg-sky-50/70 p-3 space-y-2 text-[11px]"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-200/80 pb-1.5">
+                <span className="font-semibold text-sky-950">
+                  Hasil Verifikasi Data Pesisir & Wilayah Terkini (Google Search Grounding · {groundedProfile.model})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setGroundedProfile(null)}
+                  className="text-[10px] font-medium text-sky-800 hover:underline"
+                >
+                  Tutup
+                </button>
+              </div>
+              <div className="whitespace-pre-wrap leading-relaxed text-slate-800">
+                {groundedProfile.summaryText}
+              </div>
+              {groundedProfile.sources.length > 0 && (
+                <div className="pt-1.5 border-t border-sky-200/70 flex flex-wrap items-center gap-1.5">
+                  <span className="font-semibold text-sky-900">Sumber Referensi Web:</span>
+                  {groundedProfile.sources.map((src) => (
+                    <a
+                      key={src.uri}
+                      href={src.uri}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-sky-200 text-sky-800 hover:bg-sky-100 font-medium truncate max-w-[240px]"
+                    >
+                      {src.title}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* WPP-NRI Active Fishery Management & Real Shoreline Topology Summary Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-sky-50/70 border border-sky-200/80 rounded-xl p-2.5">
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-800">
+                Garis Pantai & Proporsi Domain
+              </div>
+              <div className="text-xs font-bold font-mono tabular-nums text-slate-900 mt-0.5">
+                {adminMarineBundle.spatialDataStatus.totalCoastlineKm} km (MSL 0m)
+              </div>
+              <div className="text-[11px] font-mono tabular-nums text-slate-600 truncate">
+                Darat {adminMarineBundle.spatialDataStatus.landFractionPct}% · Laut {adminMarineBundle.spatialDataStatus.waterFractionPct}%
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-800">
+                Wilayah Pengelolaan Perikanan
+              </div>
+              <div className="text-xs font-bold font-mono text-slate-900 mt-0.5">
+                {adminMarineBundle.wppPrimary.code}
+              </div>
+              <div className="text-[11px] text-slate-600 truncate">
+                {adminMarineBundle.wppPrimary.seaAreas}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-800">
+                Potensi Lestari (MSY)
+              </div>
+              <div className="text-xs font-bold font-mono tabular-nums text-slate-900 mt-0.5">
+                {adminMarineBundle.wppPrimary.msyTonsPerYear.toLocaleString('id-ID')} ton/thn
+              </div>
+              <div className="text-[11px] text-slate-600">
+                JTB: {adminMarineBundle.wppPrimary.jtbTonsPerYear.toLocaleString('id-ID')} ton/thn
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-800">
+                Tingkat Pemanfaatan & Komoditas
+              </div>
+              <div className="text-xs font-bold font-mono tabular-nums text-teal-800 mt-0.5">
+                {adminMarineBundle.wppPrimary.utilizationRatePct}% ({adminMarineBundle.wppPrimary.statusStock})
+              </div>
+              <div className="text-[11px] text-slate-600 truncate">
+                {adminMarineBundle.wppPrimary.dominantCommodities.join(', ')}
+              </div>
+            </div>
+          </div>
+
+          {/* Shoreline (Garis Pantai) Extracted Lines Table */}
+          <div className="border border-amber-200/90 rounded-xl overflow-hidden bg-amber-50/20">
+            <div className="bg-amber-100/70 px-3 py-1.5 font-semibold text-[11px] text-amber-950 flex flex-wrap items-center justify-between gap-2">
+              <span>Daftar Vektor Garis Pantai (Shoreline) Terkunci Elevasi DEM & Citra Satelit</span>
+              <span className="font-mono text-amber-800">
+                Arah Hadap Laut: {adminMarineBundle.spatialDataStatus.seawardLabel} · Datum Vertikal BIG / Dishidros TNI AL
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-[11px]">
+                <thead>
+                  <tr className="border-b border-amber-200/80 bg-amber-50/60 text-slate-700">
+                    <th className="py-1.5 px-2.5 font-semibold">Layer Garis Pantai</th>
+                    <th className="py-1.5 px-2.5 font-semibold">Datum Pasut / Elevasi</th>
+                    <th className="py-1.5 px-2.5 font-semibold">Sumber Ekstraksi Spasial</th>
+                    <th className="py-1.5 px-2.5 font-semibold text-right">Panjang (km)</th>
+                    <th className="py-1.5 px-2.5 font-semibold text-right">Sinuositas</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-amber-200/50 tabular-nums">
+                  {activeShorelineLines.map((sl) => (
+                    <tr key={sl.id} className="hover:bg-amber-50/70">
+                      <td className="py-1.5 px-2.5">
+                        <span className="inline-flex items-center gap-1.5 font-semibold text-slate-900">
+                          <span
+                            className="w-3.5 h-1 rounded-xs shrink-0"
+                            style={{ backgroundColor: sl.strokeColor }}
+                          />
+                          {sl.label}
+                        </span>
+                      </td>
+                      <td className="py-1.5 px-2.5 font-mono text-slate-700">
+                        {sl.datumElevationM > 0 ? `+${sl.datumElevationM}` : sl.datumElevationM} m MSL
+                      </td>
+                      <td className="py-1.5 px-2.5 text-slate-600">{sl.dataSource}</td>
+                      <td className="py-1.5 px-2.5 font-mono font-semibold text-right text-slate-900">
+                        {sl.lengthKm.toLocaleString('id-ID')} km
+                      </td>
+                      <td className="py-1.5 px-2.5 font-mono text-right text-slate-700">
+                        {sl.sinuosityIndex.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Marine Spatial Zones (WPP-NRI, Konservasi, Mangrove, RZWP-3-K, Alur/Pipa) */}
+          <div className="border border-slate-200/80 rounded-xl overflow-hidden">
+            <div className="bg-slate-100/90 px-3 py-1.5 font-semibold text-[11px] text-slate-800 flex items-center justify-between">
+              <span>Daftar Zona Kelautan (WPP-NRI, Konservasi KKPD/KKPN & RZWP-3-K)</span>
+              <span className="font-mono text-slate-500">KKP / Permen KP 28/2021</span>
+            </div>
+            <div className="max-h-56 overflow-y-auto">
+              <table className="w-full text-left border-collapse text-[11px]">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                    <th className="py-1.5 px-2.5 font-semibold">Kategori Zona</th>
+                    <th className="py-1.5 px-2.5 font-semibold">Kode & Nama Zona</th>
+                    <th className="py-1.5 px-2.5 font-semibold">Sub-Zona & Aturan Pemanfaatan</th>
+                    <th className="py-1.5 px-2.5 font-semibold text-right">Luas (Ha)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200/60 tabular-nums">
+                  {activeMarineZones.map((mz) => (
+                    <tr key={mz.id} className="hover:bg-slate-50/90">
+                      <td className="py-1.5 px-2.5">
+                        <span className="inline-flex items-center gap-1.5 font-medium text-slate-800">
+                          <span
+                            className="w-2 h-2 rounded-xs shrink-0"
+                            style={{ backgroundColor: mz.strokeColor }}
+                          />
+                          {mz.categoryLabel}
+                        </span>
+                      </td>
+                      <td className="py-1.5 px-2.5">
+                        <div className="font-semibold text-slate-900">{mz.name}</div>
+                        <div className="font-mono text-[10px] text-slate-500">{mz.zoneCode} · {mz.legalBasis}</div>
+                      </td>
+                      <td className="py-1.5 px-2.5 text-slate-600">
+                        <div className="font-medium text-slate-800">{mz.subZoneType}</div>
+                        <div className="text-[10px] text-slate-500">{mz.allowedActivities}</div>
+                      </td>
+                      <td className="py-1.5 px-2.5 font-mono text-right text-slate-700">
+                        {mz.areaHa.toLocaleString('id-ID')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Live Map Legend, Data Telemetry & Execution Console Log */}
       {showVisualization && (

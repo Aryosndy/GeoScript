@@ -182,6 +182,285 @@ async function startServer() {
     }
   });
 
+  // In-memory LRU cache for Real Administrative Hierarchy (Nominatim) & OSM Coastline/Boundary Vectors (Overpass)
+  const realSpatialZonesCache = new Map<string, Record<string, unknown>>();
+
+  app.get('/api/spatial/real-zones', async (req: Request, res: Response) => {
+    const minLon = Number(req.query.minLon);
+    const minLat = Number(req.query.minLat);
+    const maxLon = Number(req.query.maxLon);
+    const maxLat = Number(req.query.maxLat);
+
+    if (
+      !Number.isFinite(minLon) ||
+      !Number.isFinite(minLat) ||
+      !Number.isFinite(maxLon) ||
+      !Number.isFinite(maxLat) ||
+      minLon >= maxLon ||
+      minLat >= maxLat
+    ) {
+      res.status(400).json({ error: 'BBox koordinat tidak valid.' });
+      return;
+    }
+
+    const cacheKey = `${minLon.toFixed(3)},${minLat.toFixed(3)},${maxLon.toFixed(3)},${maxLat.toFixed(3)}`;
+    const cached = realSpatialZonesCache.get(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
+    const cLat = (minLat + maxLat) / 2;
+    const cLon = (minLon + maxLon) / 2;
+    // Clamp Overpass query box around center (max 0.36 deg span) so Overpass responds rapidly
+    const halfSpanLat = Math.min(0.18, (maxLat - minLat) / 2);
+    const halfSpanLon = Math.min(0.18, (maxLon - minLon) / 2);
+    const qMinLat = (cLat - halfSpanLat).toFixed(4);
+    const qMaxLat = (cLat + halfSpanLat).toFixed(4);
+    const qMinLon = (cLon - halfSpanLon).toFixed(4);
+    const qMaxLon = (cLon + halfSpanLon).toFixed(4);
+
+    let nominatimAdmin: {
+      provinsi?: string;
+      isoCode?: string;
+      kabKota?: string;
+      kecamatan?: string;
+      desaKelurahan?: string;
+      neighbourhood?: string;
+      displayName?: string;
+    } | null = null;
+
+    const osmCoastlines: { id: string; name: string; vertices: { lat: number; lng: number }[] }[] = [];
+    const osmAdminLines: {
+      id: string;
+      name: string;
+      adminLevel: string;
+      vertices: { lat: number; lng: number }[];
+    }[] = [];
+
+    // 1. Fetch Nominatim Reverse Geocoding (Indonesian administrative hierarchy)
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3800);
+      const nomUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${cLat.toFixed(5)}&lon=${cLon.toFixed(5)}&zoom=14&addressdetails=1&accept-language=id`;
+      const nomRes = await fetch(nomUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'GeoScriptStudio-GIS-Workbench/1.0 (https://aistudio.google.com)',
+        },
+      });
+      clearTimeout(timer);
+      if (nomRes.ok) {
+        const nomJson = (await nomRes.json()) as {
+          display_name?: string;
+          address?: Record<string, string>;
+        };
+        const addr = nomJson.address || {};
+        nominatimAdmin = {
+          provinsi: addr.state || addr.region || undefined,
+          isoCode: addr['ISO3166-2-lvl4'] || addr['ISO3166-2-lvl3'] || undefined,
+          kabKota: addr.city || addr.county || addr.regency || addr.state_district || undefined,
+          kecamatan: addr.municipality || addr.city_district || addr.district || addr.suburb || undefined,
+          desaKelurahan: addr.village || addr.suburb || addr.quarter || addr.town || addr.hamlet || undefined,
+          neighbourhood: addr.neighbourhood || addr.residential || addr.allotments || undefined,
+          displayName: nomJson.display_name,
+        };
+      }
+    } catch {
+      // Fallback handled cleanly on client
+    }
+
+    // 2. Fetch Overpass API real coastline (`natural=coastline`) & administrative boundaries (`boundary=administrative`)
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4500);
+      const overpassQuery = `[out:json][timeout:4];(way["natural"="coastline"](${qMinLat},${qMinLon},${qMaxLat},${qMaxLon});way["boundary"="administrative"]["admin_level"~"^(4|5|6|7|8)$"](${qMinLat},${qMinLon},${qMaxLat},${qMaxLon}););out geom 35;`;
+      const ovRes = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(overpassQuery)}`,
+      });
+      clearTimeout(timer);
+      if (ovRes.ok) {
+        const ovJson = (await ovRes.json()) as {
+          elements?: Array<{
+            id: number;
+            tags?: Record<string, string>;
+            geometry?: Array<{ lat: number; lon: number }>;
+          }>;
+        };
+        for (const el of ovJson.elements || []) {
+          if (!Array.isArray(el.geometry) || el.geometry.length < 2) continue;
+          // Decimate vertices to max 40 points per way for fast rendering
+          const step = Math.max(1, Math.floor(el.geometry.length / 40));
+          const verts = el.geometry
+            .filter((_, idx) => idx % step === 0 || idx === el.geometry!.length - 1)
+            .map((pt) => ({
+              lat: Number(pt.lat.toFixed(5)),
+              lng: Number(pt.lon.toFixed(5)),
+            }));
+          if (el.tags?.natural === 'coastline') {
+            osmCoastlines.push({
+              id: `osm-coast-${el.id}`,
+              name: el.tags?.name || `Garis Pantai Vektor OSM (#${el.id})`,
+              vertices: verts,
+            });
+          } else if (el.tags?.boundary === 'administrative') {
+            osmAdminLines.push({
+              id: `osm-adm-${el.id}`,
+              name: el.tags?.name || `Batas Administrasi OSM (Level ${el.tags?.admin_level || '6'})`,
+              adminLevel: el.tags?.admin_level || '6',
+              vertices: verts,
+            });
+          }
+        }
+      }
+    } catch {
+      // Fallback handled via DEM shoreline contouring on client
+    }
+
+    const payload = {
+      available: Boolean(nominatimAdmin || osmCoastlines.length > 0 || osmAdminLines.length > 0),
+      fetchedAt: new Date().toISOString(),
+      nominatimAdmin,
+      osmCoastlines: osmCoastlines.slice(0, 18),
+      osmAdminLines: osmAdminLines.slice(0, 18),
+    };
+
+    if (realSpatialZonesCache.size >= 80) {
+      const oldestKey = realSpatialZonesCache.keys().next().value;
+      if (oldestKey) realSpatialZonesCache.delete(oldestKey);
+    }
+    realSpatialZonesCache.set(cacheKey, payload);
+    res.json(payload);
+  });
+
+  // Helper to extract web citations from Gemini Google Search Grounding chunks
+  function extractGroundingSources(
+    chunks: unknown[] | undefined
+  ): Array<{ title: string; uri: string }> {
+    if (!Array.isArray(chunks)) return [];
+    const seen = new Set<string>();
+    const sources: Array<{ title: string; uri: string }> = [];
+    for (const raw of chunks) {
+      const item = raw as { web?: { uri?: string; title?: string } };
+      const uri = item?.web?.uri?.trim();
+      if (!uri || seen.has(uri)) continue;
+      seen.add(uri);
+      sources.push({
+        title: item?.web?.title?.trim() || uri,
+        uri,
+      });
+    }
+    return sources.slice(0, 8);
+  }
+
+  // In-memory LRU cache for Google Search Grounded Administrative Profiles
+  const groundedAdminCache = new Map<
+    string,
+    {
+      summaryText: string;
+      sources: Array<{ title: string; uri: string }>;
+      model: string;
+      groundedAt: string;
+    }
+  >();
+
+  app.post('/api/spatial/grounded-admin-profile', async (req: Request, res: Response) => {
+    const body = (req.body || {}) as {
+      regionName?: string;
+      provinsi?: string;
+      kabKota?: string;
+      kecamatan?: string;
+      desaKelurahan?: string;
+      centerLat?: number;
+      centerLon?: number;
+      wppCode?: string;
+    };
+
+    const regionName = String(body.regionName || 'Wilayah Studi Indonesia').trim();
+    const provinsi = String(body.provinsi || '').trim();
+    const kabKota = String(body.kabKota || '').trim();
+    const kecamatan = String(body.kecamatan || '').trim();
+    const desaKelurahan = String(body.desaKelurahan || '').trim();
+    const centerLat = Number(body.centerLat || -6.2);
+    const centerLon = Number(body.centerLon || 106.8);
+    const wppCode = String(body.wppCode || 'WPP-NRI').trim();
+
+    const cacheKey = `${regionName}|${provinsi}|${kabKota}|${kecamatan}|${desaKelurahan}|${centerLat.toFixed(2)},${centerLon.toFixed(2)}`;
+    const cached = groundedAdminCache.get(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
+    const ai = createGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error:
+          'GEMINI_API_KEY belum terkonfigurasi di server. Atur secret GEMINI_API_KEY di panel Settings > Secrets.',
+      });
+      return;
+    }
+
+    const prompt = `Gunakan Google Search untuk mencari data administrasi wilayah, kependudukan (BPS/Kemendagri), dan kondisi geografis/pesisir terkini untuk wilayah berikut di Indonesia:
+- Wilayah Studi (AOI): ${regionName} (Koordinat pusat: ${centerLat.toFixed(4)}°, ${centerLon.toFixed(4)}°)
+- Provinsi: ${provinsi || 'Sesuai koordinat'}
+- Kabupaten/Kota: ${kabKota || 'Sesuai koordinat'}
+- Kecamatan: ${kecamatan || 'Sesuai koordinat'}
+- Desa/Kelurahan & Struktur RT/RW: ${desaKelurahan || 'Sesuai koordinat'}
+- Wilayah Pengelolaan Perikanan: ${wppCode}
+
+Sajikan ringkasan faktual dan terstruktur dalam bahasa Indonesia (maksimal 4 poin padat) yang mencakup:
+1. Kode Wilayah Kemendagri/BPS & Hierarki Resmi (Provinsi, Kabupaten/Kota, Kecamatan, serta daftar Desa/Kelurahan utama di area tersebut).
+2. Struktur Lingkungan RT/RW, Karakteristik Permukiman/Pesisir, serta Estimasi Demografi/Kependudukan terbaru dari BPS/Dukcapil.
+3. Kebijakan Tata Ruang (RTRW/RDTR Provinsi & Kab/Kota) atau Zonasi Pesisir (${wppCode}) yang berlaku di wilayah ini.`;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: prompt,
+        config: {
+          tools: [{ googleSearch: {} }],
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      });
+
+      const summaryText = (response.text || '').trim();
+      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks as
+        | unknown[]
+        | undefined;
+      const sources = extractGroundingSources(chunks);
+
+      if (!summaryText) {
+        res.status(502).json({
+          error: 'Model tidak mengembalikan hasil pencarian data administrasi wilayah.',
+        });
+        return;
+      }
+
+      const resultPayload = {
+        summaryText,
+        sources,
+        model: 'gemini-4-hydrogen',
+        groundedAt: new Date().toISOString(),
+      };
+
+      if (groundedAdminCache.size >= 40) {
+        const firstKey = groundedAdminCache.keys().next().value;
+        if (firstKey) groundedAdminCache.delete(firstKey);
+      }
+      groundedAdminCache.set(cacheKey, resultPayload);
+      res.json(resultPayload);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({
+        error: `Gagal memuat verifikasi Google Search Grounding: ${errMsg}`,
+      });
+    }
+  });
+
   app.post('/api/chat', async (req: Request, res: Response) => {
     const body = (req.body || {}) as ChatRequestBody;
     const message = typeof body.message === 'string' ? body.message.trim() : '';
@@ -223,6 +502,7 @@ ${contextLines || 'Belum ada konteks spesifik.'}
 
 Aturan Jawaban:
 - Rujuk parameter, wilayah, indeks, atau ringkasan visualisasi peta pengguna saat relevan agar terasa kontekstual.
+- Gunakan Google Search ketika pengguna menanyakan data batas administrasi terbaru, regulasi BIG/KKP/Kemendagri, atau fakta wilayah terkini.
 - Jawab maksimal 3-5 paragraf ringkas atau poin-poin rapi.`;
 
     const formattedHistory: Content[] = Array.isArray(body.history)
@@ -251,11 +531,16 @@ Aturan Jawaban:
         config: {
           systemInstruction,
           thinkingConfig: { thinkingLevel },
+          ...(modelName === 'gemini-4-hydrogen' ? { tools: [{ googleSearch: {} }] } : {}),
         },
       });
 
       const response = await chat.sendMessage({ message });
       const replyText = (response.text || '').trim();
+      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks as
+        | unknown[]
+        | undefined;
+      const sources = extractGroundingSources(chunks);
 
       if (!replyText) {
         res.status(502).json({
@@ -267,6 +552,7 @@ Aturan Jawaban:
       res.json({
         reply: replyText,
         model: modelName,
+        sources,
       });
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);

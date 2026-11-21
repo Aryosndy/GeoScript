@@ -135,10 +135,16 @@ export function generateMapVisualization(
     SPECTRAL_INDEX_DEFINITIONS[0];
 
   const isSwan = platformId === 'swan' || templateId === 'coastal-wave-swan';
-  const isTidal = templateId === 'tidal-analysis-harmonics';
+  const isHydroCurrent = templateId === 'hydrodynamic-2d-current';
+  const isTss = templateId === 'tss-turbidity-mapping';
+  const isBathymetry = templateId === 'bathymetry-cross-section';
+  const isTidal =
+    templateId === 'tidal-analysis-harmonics' || templateId === 'big-tidal-prediction';
+  const isAbrasionDsas = templateId === 'coastal-abrasion-accretion-dsas';
   const isShorelineSlope = templateId === 'shoreline-slope-erosion';
   const isLulc = templateId === 'land-cover-classification';
-  const isFloodSar = templateId === 'sar-flood-mapping';
+  const isFloodSar =
+    templateId === 'sar-flood-mapping' || templateId === 'flood-sar-sentinel1';
   const isLst = templateId === 'lst-thermal-landsat';
   const isTerrain = templateId === 'terrain-slope-watershed';
   const isUav =
@@ -146,6 +152,8 @@ export function generateMapVisualization(
     platformId === 'pix4d-cli' ||
     templateId === 'uav-agisoft-metashape' ||
     templateId === 'uav-pix4d-photogrammetry';
+  const isAdminBoundary = templateId === 'admin-boundary-hierarchy-rt-rw';
+  const isMarineSpatialWpp = templateId === 'marine-spatial-wpp-conservation';
 
   // Web Mercator bounds for exact map alignment
   const nxMin = lonToNormX(bbox.minLon);
@@ -215,7 +223,7 @@ export function generateMapVisualization(
         ? Math.max(-0.5, Math.min(0.85, (r + b - 2 * gr + (r - b) * 0.9) * 1.6))
         : (0.28 - greenScore) * 0.55;
 
-    if (isLulc) {
+    if (isLulc || isAdminBoundary || isMarineSpatialWpp) {
       if (isWater) return { val: 1, classIdx: 0, elevM: elev };
       if (isBuiltUp) return { val: 2, classIdx: 1, elevM: elev };
       if (greenScore > 0.12 && elev >= 0 && elev <= 5.5) return { val: 5, classIdx: 4, elevM: elev }; // Mangrove / coastal wetland
@@ -237,13 +245,67 @@ export function generateMapVisualization(
       return { val: Math.max(0.15, Math.min(3.8, hs)), elevM: elev };
     }
 
+    if (isHydroCurrent) {
+      // 2D Hydrodynamic current speed |V| (m/s) over water
+      if (elev > 0.5 && !isOpticalWater) {
+        return { val: 0, hidden: true, elevM: elev };
+      }
+      const depthM = Math.max(0.4, Math.abs(Math.min(0, elev)) + (isOpticalWater && elev > 0 ? 1.8 : 0.8));
+      const baseHs = g.marine.waveHeightM || 1.35;
+      // Longshore current peaks in shallow breaker zone + tidal channel flow
+      const surfZoneJet = 0.55 * Math.exp(-Math.pow((depthM - 2.2) / 1.9, 2));
+      const turbidityJet = Math.max(0, (r - b) * 0.85);
+      const speedMs = Math.max(0.06, Math.min(1.75, 0.24 + surfZoneJet + baseHs * 0.18 + turbidityJet));
+      return { val: speedMs, elevM: elev };
+    }
+
+    if (isTss) {
+      // Total Suspended Solid (TSS mg/L) over water & estuaries
+      if (elev > 0.8 && !isOpticalWater) {
+        return { val: 0, hidden: true, elevM: elev };
+      }
+      const ndti = (r - gr) / Math.max(0.04, r + gr);
+      const shallowFactor = elev >= -2.5 && elev <= 1.0 ? 28 : 0;
+      const tssMgL = Math.max(
+        5,
+        Math.min(250, 22 * Math.exp(2.8 * ndti + r * 2.2) + shallowFactor)
+      );
+      return { val: tssMgL, elevM: elev };
+    }
+
+    if (isBathymetry) {
+      // Topobathymetry (SDB Stumpf log-ratio over shallow water + Terrarium DEM on land)
+      if (isWater && elev > -1.2) {
+        const sdbRatio = Math.log(Math.max(2, 1000 * b)) / Math.log(Math.max(2, 1000 * gr));
+        const distFromEdge = Math.min(px, py, g.gridSize - 1 - px, g.gridSize - 1 - py) / (g.gridSize / 2);
+        const sdbDepth = -1.2 - (1 - lum) * 14.5 * Math.max(0.6, Math.min(1.35, sdbRatio)) - distFromEdge * 3.2;
+        return { val: Math.max(-25, Math.min(-0.2, sdbDepth)), elevM: sdbDepth };
+      }
+      return { val: Math.max(-25, Math.min(25, elev)), elevM: elev };
+    }
+
+    if (isAbrasionDsas) {
+      // Coastal erosion / accretion rate EPR (m/year) in coastal zone (-5m..+12m)
+      if (elev > 16 && !isOpticalWater) {
+        return { val: 0, hidden: true, elevM: elev };
+      }
+      // Bare turbid water / steep low bank -> abrasion (-m/yr); vegetated mangrove / sediment bar -> accretion (+m/yr)
+      const vegProtection = greenScore * 2.8;
+      const waveExposure = (g.marine.waveHeightM || 1.4) * 0.95;
+      const eprRate = Math.max(
+        -4.8,
+        Math.min(4.5, vegProtection - waveExposure + (r - b) * 2.4 - slopeDeg * 0.25)
+      );
+      return { val: eprRate, elevM: elev };
+    }
+
     if (isTidal) {
       // Flooded coastal/intertidal land relative to configured tide level (HHWL)
-      const hhwl = Math.max(0.6, Math.min(2.6, Math.abs(thresholdValue) > 0.4 ? Math.abs(thresholdValue) * 0.45 : 1.35));
+      const hhwl = Math.max(0.6, Math.min(2.6, Math.abs(thresholdValue) > 0.4 ? Math.abs(thresholdValue) * 0.85 : 1.55));
       if (elev > hhwl + 1.4) {
         return { val: elev, hidden: true, elevM: elev };
       }
-      return { val: Math.max(-1.8, Math.min(1.8, hhwl - elev)), elevM: elev };
+      return { val: Math.max(-1.8, Math.min(2.2, hhwl - elev)), elevM: elev };
     }
 
     if (isShorelineSlope) {
@@ -336,7 +398,7 @@ export function generateMapVisualization(
     const nFine = fallbackSpatialNoise(lat * 2.1, lng * 2.1, dateSeed + 4.2);
     const radialCenter = Math.hypot(u - 0.5, v - 0.5);
 
-    if (isLulc) {
+    if (isLulc || isAdminBoundary || isMarineSpatialWpp) {
       const elevProxy = 0.5 + 0.5 * nBase + (v - 0.45) * 0.35;
       if (elevProxy < 0.22) return { val: 1, classIdx: 0, elevM: -2 };
       if (radialCenter < 0.24) return { val: 2, classIdx: 1, elevM: 12 };
@@ -345,6 +407,10 @@ export function generateMapVisualization(
       return { val: 4, classIdx: 3, elevM: 35 };
     }
     if (isSwan) return { val: Math.max(0.3, Math.min(3.2, 0.8 + 1.6 * v + 0.25 * nBase)), elevM: -8 };
+    if (isHydroCurrent) return { val: Math.max(0.1, Math.min(1.6, 0.45 + 0.6 * v + 0.25 * nBase)), elevM: -5 };
+    if (isTss) return { val: Math.max(8, Math.min(220, 68 + 65 * (1 - v) + 35 * nBase)), elevM: -3 };
+    if (isBathymetry) return { val: Math.max(-22, Math.min(15, (0.42 - v) * 28 + 2.5 * nBase)), elevM: (0.42 - v) * 28 };
+    if (isAbrasionDsas) return { val: Math.max(-4.5, Math.min(4.2, -0.8 + 3.1 * nBase)), elevM: 0.5 };
     if (isTidal) return { val: (0.45 - v) * 2.2 + 0.3 * nBase, elevM: 1.0 };
     if (isShorelineSlope) return { val: Math.max(0.8, 3.2 + 2.5 * nBase), elevM: 1.5 };
     if (isFloodSar) return { val: Math.max(0, Math.min(1, 0.55 + 0.4 * nBase)), elevM: 3 };
@@ -362,7 +428,15 @@ export function generateMapVisualization(
   let modeTitle = `Visualisasi ${spectralIndex} (${params.sensor === 'LANDSAT_8_9' ? 'Landsat 8/9' : params.sensor === 'SENTINEL_1_SAR' ? 'Sentinel-1' : 'Sentinel-2'})`;
   let modeBadge = realGrid ? 'Data Satelit + DEM Real' : 'Pratinjau Parameter';
 
-  if (isLulc) {
+  if (isAdminBoundary) {
+    valMin = 1;
+    valMax = 6;
+    modeTitle = 'Hierarki Batas Administrasi (Provinsi–Kab/Kota–Kecamatan–Desa–RT/RW)';
+  } else if (isMarineSpatialWpp) {
+    valMin = 1;
+    valMax = 6;
+    modeTitle = 'Zonasi Ruang Laut (WPP-NRI, Konservasi KKPD/KKPN & RZWP-3-K)';
+  } else if (isLulc) {
     valMin = 1;
     valMax = 6;
     modeTitle = 'Klasifikasi Tutupan Lahan (LULC 6 Kelas)';
@@ -372,12 +446,39 @@ export function generateMapVisualization(
     palette = ['#1d4ed8', '#0284c7', '#14b8a6', '#facc15', '#ef4444'];
     unit = ' m';
     modeTitle = 'Tinggi Gelombang Signifikan SWAN (Hs)';
+  } else if (isHydroCurrent) {
+    valMin = 0.05;
+    valMax = 1.5;
+    palette = ['#0f172a', '#0284c7', '#06b6d4', '#facc15', '#ef4444'];
+    unit = ' m/s';
+    modeTitle = 'Model Hidrodinamika Kecepatan Arus 2D (|V|)';
+  } else if (isTss) {
+    valMin = 5;
+    valMax = 200;
+    palette = ['#0369a1', '#0ea5e9', '#22c55e', '#eab308', '#f97316', '#b91c1c'];
+    unit = ' mg/L';
+    modeTitle = 'Sebaran Total Suspended Solid (TSS) & Kekeruhan';
+  } else if (isBathymetry) {
+    valMin = -20;
+    valMax = 15;
+    palette = ['#082f49', '#0284c7', '#38bdf8', '#bae6fd', '#fef08a', '#22c55e', '#15803d'];
+    unit = ' m';
+    modeTitle = 'Batimetri Satelit (SDB / BATNAS) & Profil Melintang A–B';
+  } else if (isAbrasionDsas) {
+    valMin = -4.5;
+    valMax = 4.5;
+    palette = ['#b91c1c', '#ef4444', '#facc15', '#34d399', '#059669'];
+    unit = ' m/thn';
+    modeTitle = 'Potensi Abrasi–Akresi & Perubahan Garis Pantai (DSAS EPR)';
   } else if (isTidal) {
     valMin = -1.6;
-    valMax = 1.6;
+    valMax = 1.8;
     palette = ['#38bdf8', '#0284c7', '#1e3a8a', '#fbbf24', '#ef4444'];
     unit = ' m';
-    modeTitle = 'Zona Genangan Pasang Surut (HHWL - DEM)';
+    modeTitle =
+      templateId === 'big-tidal-prediction'
+        ? 'Simulasi Genangan Pasang Surut Stasiun BIG (HHWL - DEM)'
+        : 'Zona Genangan Pasang Surut (HHWL - DEM)';
   } else if (isShorelineSlope) {
     valMin = 0.5;
     valMax = 12.0;
@@ -425,6 +526,14 @@ export function generateMapVisualization(
     ? Math.max(5, Math.min(45, thresholdValue > 2 ? thresholdValue : 15))
     : isSwan
     ? Math.max(0.4, Math.min(3.0, thresholdValue > 0.2 ? thresholdValue : 1.2))
+    : isHydroCurrent
+    ? Math.max(0.15, Math.min(1.4, thresholdValue > 0.08 && thresholdValue < 2.0 ? thresholdValue : 0.45))
+    : isTss
+    ? Math.max(15, Math.min(220, thresholdValue >= 10 ? thresholdValue : 80))
+    : isBathymetry
+    ? -2.0
+    : isAbrasionDsas
+    ? 0.0
     : isTidal
     ? 0
     : isShorelineSlope
@@ -486,19 +595,23 @@ export function generateMapVisualization(
         if (cell.val < minVal) minVal = cell.val;
         if (cell.val > maxVal) maxVal = cell.val;
 
-        const passes = cell.val >= effectiveThreshold;
+        const passes = isAbrasionDsas
+          ? cell.val <= -0.8
+          : isBathymetry
+          ? cell.val <= 0
+          : cell.val >= effectiveThreshold;
         if (passes) passingCount++;
 
         // Collect real shoreline / ocean / land sample coordinates for domain vectors & GCPs
-        if (isShorelineSlope && realGrid && px > 1 && px < targetGrid - 2 && py > 1 && py < targetGrid - 2) {
+        if ((isShorelineSlope || isAbrasionDsas) && realGrid && px > 1 && px < targetGrid - 2 && py > 1 && py < targetGrid - 2) {
           const eHere = cell.elevM;
           const eRight = realGrid.elevationGrid[py * targetGrid + (px + 1)];
           const eDown = realGrid.elevationGrid[(py + 1) * targetGrid + px];
           if ((eHere <= 0.3 && (eRight > 0.3 || eDown > 0.3)) || (eHere > 0.3 && (eRight <= 0.3 || eDown <= 0.3))) {
-            shorelineHits.push({ lat, lng, slopeDeg: cell.val, u });
+            shorelineHits.push({ lat, lng, slopeDeg: Math.abs(cell.val), u });
           }
         }
-        if (isSwan && cell.elevM <= 0.25 && py % 14 === 0 && px % 14 === 0) {
+        if ((isSwan || isHydroCurrent) && cell.elevM <= 0.35 && py % 14 === 0 && px % 14 === 0) {
           oceanHits.push({ lat, lng, hs: cell.val });
         }
         if (isUav && cell.elevM > 0.4 && py % 18 === 0 && px % 18 === 0) {
@@ -513,7 +626,7 @@ export function generateMapVisualization(
           rgb = hexToRgb(LULC_CLASSES[cell.classIdx].color);
         } else if (options.highlightThresholdMask) {
           if (passes) {
-            rgb = isFloodSar ? [6, 182, 212] : [20, 184, 166];
+            rgb = isFloodSar ? [6, 182, 212] : isAbrasionDsas ? [239, 68, 68] : [20, 184, 166];
             alpha = 232;
           } else {
             rgb = samplePalette(palette, (cell.val - valMin) / Math.max(1e-5, valMax - valMin));
@@ -561,6 +674,12 @@ export function generateMapVisualization(
 
   const legendItems: VizLegendItem[] = isLulc
     ? LULC_CLASSES.map((c) => ({ color: c.color, label: c.label }))
+    : isAbrasionDsas
+    ? [
+        { color: '#b91c1c', label: 'Abrasi Kritis (<= -2.0 m/thn)' },
+        { color: '#facc15', label: 'Stabil / Dinamis (-0.5..+0.5 m/thn)' },
+        { color: '#059669', label: 'Akresi / Tanah Timbul (>= +1.5 m/thn)' },
+      ]
     : [
         { color: palette[0], label: `Rendah (${valMin.toFixed(1)}${unit})` },
         {
@@ -586,49 +705,73 @@ export function generateMapVisualization(
   const dLon = Math.max(1e-5, bbox.maxLon - bbox.minLon);
 
   // Domain vectors anchored to REAL shoreline / ocean / land coordinates when available
-  const swanVectors = isSwan
-    ? (oceanHits.length >= 4
-        ? oceanHits.filter((_, idx) => idx % Math.max(1, Math.floor(oceanHits.length / 12)) === 0).slice(0, 12)
-        : Array.from({ length: 12 }, (_, idx) => ({
-            lat: bbox.minLat + (0.2 + Math.floor(idx / 4) * 0.28) * dLat,
-            lng: bbox.minLon + (0.16 + (idx % 4) * 0.22) * dLon,
-            hs: 1.45,
-          }))
-      ).map((pt) => ({
-        lat: pt.lat,
-        lng: pt.lng,
-        angleDeg: realGrid?.marine.waveDirDeg ?? 215,
-        hs: Number(pt.hs.toFixed(2)),
-      }))
-    : undefined;
+  const baseWaveAngle = realGrid?.marine.waveDirDeg ?? 215;
+  const vectorAngle = isHydroCurrent ? (baseWaveAngle + 75) % 360 : baseWaveAngle;
 
-  const transects = isShorelineSlope
-    ? shorelineHits.length >= 3
-      ? Array.from({ length: Math.min(7, shorelineHits.length) }, (_, i) => {
-          const hit = shorelineHits[Math.floor((i / Math.max(1, Math.min(7, shorelineHits.length) - 1)) * (shorelineHits.length - 1))];
-          const spanLat = dLat * 0.09;
-          const epr = Number((-3.2 + Math.sin(i * 1.1) * 3.8).toFixed(2));
-          return {
-            lat1: hit.lat - spanLat,
-            lng1: hit.lng,
-            lat2: hit.lat + spanLat,
-            lng2: hit.lng,
-            epr,
-            slopeDeg: Number(hit.slopeDeg.toFixed(1)),
-          };
-        })
-      : Array.from({ length: 7 }, (_, i) => {
-          const u = 0.12 + (i / 6) * 0.76;
-          return {
-            lat1: bbox.minLat + 0.35 * dLat,
-            lng1: bbox.minLon + u * dLon,
-            lat2: bbox.minLat + 0.65 * dLat,
-            lng2: bbox.minLon + u * dLon,
-            epr: Number((-2.9 + Math.sin(i * 1.1) * 3.4).toFixed(2)),
-            slopeDeg: Number((3.4 + Math.cos(i) * 1.4).toFixed(1)),
-          };
-        })
-    : undefined;
+  const swanVectors =
+    isSwan || isHydroCurrent
+      ? (oceanHits.length >= 4
+          ? oceanHits
+              .filter((_, idx) => idx % Math.max(1, Math.floor(oceanHits.length / 12)) === 0)
+              .slice(0, 12)
+          : Array.from({ length: 12 }, (_, idx) => ({
+              lat: bbox.minLat + (0.2 + Math.floor(idx / 4) * 0.28) * dLat,
+              lng: bbox.minLon + (0.16 + (idx % 4) * 0.22) * dLon,
+              hs: isHydroCurrent ? 0.65 : 1.45,
+            }))
+        ).map((pt, idx) => ({
+          lat: pt.lat,
+          lng: pt.lng,
+          angleDeg: isHydroCurrent ? (vectorAngle + (idx % 3 - 1) * 12 + 360) % 360 : vectorAngle,
+          hs: Number(pt.hs.toFixed(2)),
+        }))
+      : undefined;
+
+  const transects =
+    isShorelineSlope || isAbrasionDsas
+      ? shorelineHits.length >= 3
+        ? Array.from({ length: Math.min(7, shorelineHits.length) }, (_, i) => {
+            const hit =
+              shorelineHits[
+                Math.floor(
+                  (i / Math.max(1, Math.min(7, shorelineHits.length) - 1)) *
+                    (shorelineHits.length - 1)
+                )
+              ];
+            const spanLat = dLat * 0.09;
+            const epr = Number((-3.2 + Math.sin(i * 1.1) * 3.8).toFixed(2));
+            return {
+              lat1: hit.lat - spanLat,
+              lng1: hit.lng,
+              lat2: hit.lat + spanLat,
+              lng2: hit.lng,
+              epr,
+              slopeDeg: Number(hit.slopeDeg.toFixed(1)),
+            };
+          })
+        : Array.from({ length: 7 }, (_, i) => {
+            const u = 0.12 + (i / 6) * 0.76;
+            return {
+              lat1: bbox.minLat + 0.35 * dLat,
+              lng1: bbox.minLon + u * dLon,
+              lat2: bbox.minLat + 0.65 * dLat,
+              lng2: bbox.minLon + u * dLon,
+              epr: Number((-2.9 + Math.sin(i * 1.1) * 3.4).toFixed(2)),
+              slopeDeg: Number((3.4 + Math.cos(i) * 1.4).toFixed(1)),
+            };
+          })
+      : isBathymetry
+      ? [
+          {
+            lat1: bbox.minLat + 0.18 * dLat,
+            lng1: bbox.minLon + 0.45 * dLon,
+            lat2: bbox.minLat + 0.84 * dLat,
+            lng2: bbox.minLon + 0.55 * dLon,
+            epr: 2.5, // Renders emerald cross-section line A-B
+            slopeDeg: 2.8,
+          },
+        ]
+      : undefined;
 
   const gcpPoints = isUav
     ? landHits.length >= 5

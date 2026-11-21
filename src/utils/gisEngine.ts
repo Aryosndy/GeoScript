@@ -5,6 +5,16 @@ import {
   generateShorelineSlopeScript,
   generateTidalScript,
 } from './gisExtendedGenerators';
+import {
+  COASTAL_HYDRO_TEMPLATES,
+  generateCoastalHydroScript,
+  isCoastalHydroTemplate,
+} from './coastalHydroEngine';
+import {
+  ADMIN_MARINE_TEMPLATES,
+  generateAdminMarineScript,
+  isAdminMarineTemplate,
+} from './adminAndMarineZonesEngine';
 
 export type GisPlatformId =
   | 'gee-js'
@@ -1704,6 +1714,8 @@ export const GIS_TEMPLATES: GisTemplate[] = [
       ],
     },
   },
+  ...COASTAL_HYDRO_TEMPLATES,
+  ...ADMIN_MARINE_TEMPLATES,
 ];
 
 /**
@@ -2280,6 +2292,12 @@ export function generateGisScript(
     uploadedAttrComment,
   };
 
+  if (isCoastalHydroTemplate(templateId)) {
+    return generateCoastalHydroScript(templateId, platformId, params, extCtx);
+  }
+  if (isAdminMarineTemplate(templateId)) {
+    return generateAdminMarineScript(templateId, platformId, params, extCtx);
+  }
   if (platformId === 'agisoft-py') {
     return generateAgisoftMetashapeScript(templateId, params, extCtx);
   }

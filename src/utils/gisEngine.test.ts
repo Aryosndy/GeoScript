@@ -300,5 +300,192 @@ test('generateMapVisualization uses RealEoGrid for DEM slope, water masking, and
   assert.equal(landProbe.valueText.startsWith('Masked'), true);
 });
 
+import {
+  BIG_TIDE_STATIONS,
+  computeCoastalHydroSummary,
+  extractBathymetryCrossSection,
+  predictBigTideSeries,
+} from './coastalHydroEngine';
 
+test('predictBigTideSeries, extractBathymetryCrossSection, and computeCoastalHydroSummary compute authentic coastal & BIG tidal metrics', () => {
+  assert.equal(BIG_TIDE_STATIONS.length, 8);
+
+  const priokTide = predictBigTideSeries('tanjung-priok', '2026-05-01', 72, 1);
+  assert.equal(priokTide.station.code, 'BIG-JKT-01');
+  assert.equal(priokTide.formzahl > 3.0, true); // Diurnal / Harian Tunggal in Jakarta Bay
+  assert.equal(priokTide.hhwlM > priokTide.mslM && priokTide.mslM > priokTide.llwlM, true);
+  assert.equal(priokTide.series.length, 73);
+
+  const belawanTide = predictBigTideSeries('belawan-medan', '2026-05-01', 48, 1);
+  assert.equal(belawanTide.formzahl <= 0.25, true); // Semidiurnal in Malacca Strait
+
+  const crossSec = extractBathymetryCrossSection(sampleParams.bbox, null, 0.75, 1.5, 25);
+  assert.equal(crossSec.points.length, 25);
+  assert.equal(crossSec.maxElevationM > 0, true);
+  assert.equal(crossSec.minBathymetryM < -5, true);
+  assert.equal(crossSec.totalLengthM > 1000, true);
+
+  const summary = computeCoastalHydroSummary(sampleParams.bbox, null, 'surabaya-tanjung-perak', 0.85);
+  assert.equal(summary.hydro.maxCurrentMs >= summary.hydro.meanCurrentMs, true);
+  assert.equal(summary.tss.maxTssMgL >= summary.tss.meanTssMgL, true);
+  assert.equal(summary.wave.wavePowerKwPerM > 0, true);
+  assert.equal(summary.dsas.transects.length, 7);
+
+  // Verify DSAS v5.1 sediment statistical & hydrodynamic coupling fields
+  assert.equal(summary.dsas.meanSceMeters > 0, true);
+  assert.equal(summary.dsas.meanRSquared > 0.5 && summary.dsas.meanRSquared <= 1, true);
+  assert.equal(summary.dsas.meanLseMeters > 0, true);
+  assert.equal(summary.dsas.meanD50Mm > 0, true);
+  assert.equal(summary.dsas.activeClosureDepthM > 1.5, true);
+  assert.equal(summary.dsas.grossLongshoreTransportM3PerYr > 0, true);
+  for (const tr of summary.dsas.transects) {
+    assert.equal(tr.sceMeters >= Math.abs(tr.nsmMeters), true);
+    assert.equal(tr.eprUncertaintyMPerYear > 0, true);
+    assert.equal(typeof tr.wlrMPerYear, 'number');
+    assert.equal(tr.rSquared >= 0.5 && tr.rSquared <= 1, true);
+    assert.equal(tr.d50Mm > 0, true);
+    assert.equal(tr.localBedShearPa > 0 && tr.criticalShearPa > 0, true);
+    assert.equal(tr.shieldsNumber > 0, true);
+    assert.equal(typeof tr.longshoreTransportM3PerYr, 'number');
+    assert.equal(typeof tr.sedimentBudgetM3PerYr, 'number');
+  }
+});
+
+test('generateGisScript and generateMapVisualization support all 5 new coastal & hydro-oceanographic templates', () => {
+  const newTemplates = [
+    'hydrodynamic-2d-current',
+    'tss-turbidity-mapping',
+    'bathymetry-cross-section',
+    'big-tidal-prediction',
+    'coastal-abrasion-accretion-dsas',
+  ] as const;
+
+  for (const tplId of newTemplates) {
+    const pyScript = generateGisScript(tplId, 'python-gis', sampleParams);
+    const geeScript = generateGisScript(tplId, 'gee-js', sampleParams);
+    assert.equal(pyScript.length > 250, true, `Python script for ${tplId} should be non-empty`);
+    assert.equal(geeScript.length > 250, true, `GEE script for ${tplId} should be non-empty`);
+
+    const viz = generateMapVisualization(tplId, 'gee-js', sampleParams);
+    assert.equal(viz.legendItems.length >= 3, true);
+    assert.equal(viz.stats.totalAreaHa > 0, true);
+  }
+});
+
+import {
+  WPP_NRI_CATALOG,
+  generateAdminAndMarineSpatialBundle,
+  exportAdminAndMarineGeoJson,
+} from './adminAndMarineZonesEngine';
+import { GIS_TEMPLATES } from './gisEngine';
+
+test('generateAdminAndMarineSpatialBundle and exportAdminAndMarineGeoJson generate real-DEM-locked Garis Pantai (MSL/HHWL/LLWL) and WPP-NRI/Konservasi marine zones without synthetic village boundaries', () => {
+  assert.equal(WPP_NRI_CATALOG.length, 11);
+  assert.equal(GIS_TEMPLATES.length, 18);
+
+  // Build a synthetic coastal RealEoGrid (north half = sea <= 0m, south half = land > 0m)
+  const N = 32;
+  const elev = new Float32Array(N * N);
+  const rgb = new Uint8Array(N * N * 3);
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      const idx = r * N + c;
+      if (r < N / 2) {
+        elev[idx] = -(N / 2 - r) * 0.6;
+        rgb[idx * 3] = 15;
+        rgb[idx * 3 + 1] = 55;
+        rgb[idx * 3 + 2] = 110;
+      } else {
+        elev[idx] = (r - N / 2 + 1) * 1.8;
+        rgb[idx * 3] = 45;
+        rgb[idx * 3 + 1] = 125;
+        rgb[idx * 3 + 2] = 40;
+      }
+    }
+  }
+  const coastalGrid: RealEoGrid = {
+    bboxKey: 'jkt-coast',
+    bbox: { ...sampleParams.bbox },
+    gridSize: N,
+    zoomUsed: 10,
+    tileCount: 4,
+    metersPerPixelX: 300,
+    metersPerPixelY: 300,
+    minElevM: -9.6,
+    maxElevM: 28.8,
+    waterPercent: 50,
+    elevationGrid: elev,
+    rgbGrid: rgb,
+    marine: { available: true, waveHeightM: 1.2, waveDirDeg: 15, wavePeriodS: 6.5 },
+    fetchDurationMs: 50,
+  };
+
+  const bundle = generateAdminAndMarineSpatialBundle(
+    sampleParams.bbox,
+    sampleParams.regionName,
+    coastalGrid,
+    {
+      available: true,
+      nominatimAdmin: {
+        provinsi: 'DKI Jakarta',
+        kabKota: 'Kota Administrasi Jakarta Utara',
+        kecamatan: 'Penjaringan',
+        desaKelurahan: 'Pluit',
+        neighbourhood: 'RW 01 / RT 004 Pluit',
+        isoCode: 'ID-JK',
+      },
+      osmCoastlines: [
+        {
+          id: 'osm-coast-test',
+          name: 'Garis Pantai Vektor OSM (natural=coastline)',
+          vertices: [
+            { lat: -6.36, lng: 106.56 },
+            { lat: -6.365, lng: 106.85 },
+            { lat: -6.36, lng: 107.14 },
+          ],
+        },
+      ],
+      osmAdminLines: [],
+      fetchedAt: new Date().toISOString(),
+    }
+  );
+
+  assert.equal(bundle.wppPrimary.code, 'WPP-NRI 712');
+  assert.equal(bundle.spatialDataStatus.isRealDemLocked, true);
+  assert.equal(bundle.spatialDataStatus.isLiveOsmEnriched, true);
+  assert.equal(bundle.spatialDataStatus.totalCoastlineKm > 0, true);
+  assert.equal(bundle.shorelineLines.length, 4); // MSL, HHWL, LLWL, + OSM Coastline
+  assert.equal(bundle.adminPolygons.length, 0);
+  assert.equal(bundle.marineZones.length, 5);
+
+  const marineCatsPresent = new Set(bundle.marineZones.map((z) => z.category));
+  for (const cat of [
+    'wpp-nri',
+    'konservasi-kkpd',
+    'sempadan-mangrove',
+    'rzwp3k-pelabuhan',
+    'alur-pipa-kabel',
+  ] as const) {
+    assert.equal(marineCatsPresent.has(cat), true, `Missing marine zone category ${cat}`);
+  }
+
+  const geojsonStr = exportAdminAndMarineGeoJson(
+    sampleParams.regionName,
+    'EPSG:32748',
+    bundle,
+    [],
+    ['wpp-nri', 'konservasi-kkpd', 'sempadan-mangrove', 'rzwp3k-pelabuhan', 'alur-pipa-kabel']
+  );
+  const parsed = JSON.parse(geojsonStr);
+  assert.equal(parsed.type, 'FeatureCollection');
+  assert.equal(
+    parsed.features.length,
+    bundle.shorelineLines.length + bundle.marineZones.length
+  );
+
+  const pyScript = generateGisScript('marine-spatial-wpp-conservation', 'python-gis', sampleParams);
+  const geeScript = generateGisScript('marine-spatial-wpp-conservation', 'gee-js', sampleParams);
+  assert.equal(pyScript.length > 250, true);
+  assert.equal(geeScript.length > 250, true);
+});
 

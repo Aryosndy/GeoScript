@@ -37,8 +37,14 @@ export const SpatialMotionGraph: React.FC<SpatialMotionGraphProps> = ({
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   const isSwanMode = platformId === 'swan' || template.id === 'coastal-wave-swan';
-  const isTidalMode = template.id === 'tidal-analysis-harmonics';
-  const isShorelineSlopeMode = template.id === 'shoreline-slope-erosion';
+  const isHydroCurrentMode = template.id === 'hydrodynamic-2d-current';
+  const isTssMode = template.id === 'tss-turbidity-mapping';
+  const isBathymetryMode = template.id === 'bathymetry-cross-section';
+  const isTidalMode =
+    template.id === 'tidal-analysis-harmonics' || template.id === 'big-tidal-prediction';
+  const isShorelineSlopeMode =
+    template.id === 'shoreline-slope-erosion' ||
+    template.id === 'coastal-abrasion-accretion-dsas';
   const isLandCoverMode = template.id === 'land-cover-classification';
   const isUavMode =
     platformId === 'agisoft-py' ||
@@ -88,6 +94,61 @@ export const SpatialMotionGraph: React.FC<SpatialMotionGraphProps> = ({
           subLabel: `Pasut Jam ke-${hr}`,
           primary: h,
           secondary: Number((h - msl).toFixed(2)),
+        };
+      });
+    }
+
+    if (isHydroCurrentMode) {
+      const hours = Array.from({ length: 13 }, (_, idx) => idx * 2);
+      return hours.map((hr, i) => {
+        const t = hr + phaseShift * 1.5;
+        const speedMs = Number(
+          Math.max(
+            0.08,
+            0.48 + 0.38 * Math.abs(Math.sin((2 * Math.PI * t) / 12.42)) + 0.08 * Math.cos(i)
+          ).toFixed(2)
+        );
+        const shearPa = Number((1025 * 0.0025 * speedMs * speedMs).toFixed(2));
+        return {
+          label: `${hr}j`,
+          subLabel: `Arus 2D Jam ke-${hr}`,
+          primary: speedMs,
+          secondary: shearPa,
+        };
+      });
+    }
+
+    if (isTssMode) {
+      return months.map((m, i) => {
+        const wetSeasonPlume = Math.cos(((i - 1) / 12) * Math.PI * 2) * 38;
+        const osc = Math.sin(phaseShift + i * 0.7) * 6.5;
+        const tss = Number(Math.max(12, Math.min(240, 74 + wetSeasonPlume + osc)).toFixed(1));
+        const ndti = Number(((tss - 60) / 280).toFixed(2));
+        return {
+          label: m,
+          subLabel: `TSS ${m}`,
+          primary: tss,
+          secondary: ndti,
+        };
+      });
+    }
+
+    if (isBathymetryMode) {
+      return Array.from({ length: 11 }, (_, i) => {
+        const frac = i / 10;
+        const distM = i * 100;
+        const z = Number(
+          (frac < 0.35
+            ? 5.8 - (frac / 0.35) * 5.8
+            : -Math.pow((frac - 0.35) / 0.65, 1.3) * 16.5 + Math.sin(phaseShift + i) * 0.25
+          ).toFixed(2)
+        );
+        const depth = Number(Math.max(0, 0.75 - z).toFixed(2));
+        return {
+          label: `${distM}m`,
+          subLabel: `Stasiun ${distM}m`,
+          primary: z,
+          secondary: depth,
         };
       });
     }
@@ -190,6 +251,9 @@ export const SpatialMotionGraph: React.FC<SpatialMotionGraphProps> = ({
     });
   }, [
     isTidalMode,
+    isHydroCurrentMode,
+    isTssMode,
+    isBathymetryMode,
     isShorelineSlopeMode,
     isUavMode,
     isSwanMode,
@@ -407,35 +471,49 @@ export const SpatialMotionGraph: React.FC<SpatialMotionGraphProps> = ({
 
   const primaryUnit = isTidalMode
     ? 'm'
-    : isShorelineSlopeMode
+    : isHydroCurrentMode
       ? activeTab === 'temporal'
-        ? ' m/thn'
+        ? ' m/s'
         : 'm'
-      : isUavMode
-        ? activeTab === 'temporal'
+      : isTssMode
+        ? ' mg/L'
+        : isBathymetryMode
           ? 'm'
-          : ' cm'
-        : isSwanMode
-          ? 'm'
-          : isThermalMode
-            ? '°C'
-            : isLandCoverMode && activeTab === 'spectral-profile'
-              ? '%'
-              : '';
+          : isShorelineSlopeMode
+            ? activeTab === 'temporal'
+              ? ' m/thn'
+              : 'm'
+            : isUavMode
+              ? activeTab === 'temporal'
+                ? 'm'
+                : ' cm'
+              : isSwanMode
+                ? 'm'
+                : isThermalMode
+                  ? '°C'
+                  : isLandCoverMode && activeTab === 'spectral-profile'
+                    ? '%'
+                    : '';
 
   const chartHeadline = isTidalMode
-    ? 'Kurva Pasang Surut & Konstanta Harmonik (M2, S2, K1, O1)'
-    : isShorelineSlopeMode
-      ? 'Dinamika Perubahan & Kemiringan Garis Pantai (EPR / Slope)'
-      : isUavMode
-        ? `Profil Fotogrametri Drone UAV (${platformId === 'pix4d-cli' ? 'Pix4Dmapper' : 'Agisoft Metashape'})`
-        : isLandCoverMode
-          ? `Dinamika Tutupan Lahan & Indeks (${indexDef.id})`
-          : isSwanMode
-            ? 'Dinamika Tinggi Gelombang Signifikan (Hs)'
-            : isThermalMode
-              ? 'Profil Suhu Permukaan Daratan (LST °C)'
-              : `Dinamika ${indexDef.id} (${params.sensor === 'S2_SR' ? 'Sentinel-2' : params.sensor})`;
+    ? 'Kurva Prediksi Pasang Surut BIG & Konstanta Harmonik'
+    : isHydroCurrentMode
+      ? 'Model Hidrodinamika Kecepatan Arus 2D (|V| m/s) & Geser Dasar'
+      : isTssMode
+        ? 'Dinamika Sebaran Total Suspended Solid (TSS mg/L) & Kekeruhan'
+        : isBathymetryMode
+          ? 'Penampang Melintang Batimetri (SDB / BATNAS) Darat → Laut (A–B)'
+          : isShorelineSlopeMode
+            ? 'Potensi Abrasi–Akresi (DSAS EPR m/thn) & Kemiringan Pantai'
+            : isUavMode
+              ? `Profil Fotogrametri Drone UAV (${platformId === 'pix4d-cli' ? 'Pix4Dmapper' : 'Agisoft Metashape'})`
+              : isLandCoverMode
+                ? `Dinamika Tutupan Lahan & Indeks (${indexDef.id})`
+                : isSwanMode
+                  ? 'Dinamika Tinggi Gelombang Signifikan (Hs)'
+                  : isThermalMode
+                    ? 'Profil Suhu Permukaan Daratan (LST °C)'
+                    : `Dinamika ${indexDef.id} (${params.sensor === 'S2_SR' ? 'Sentinel-2' : params.sensor})`;
 
   // Ekspor Grafik SVG Aktif Langsung ke Gambar JPG (1360x520)
   const handleDownloadGraphJpg = () => {
